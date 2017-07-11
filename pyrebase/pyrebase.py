@@ -23,6 +23,7 @@ import python_jwt as jwt
 from Crypto.PublicKey import RSA
 import datetime
 
+from pyrebase.exception_thread import ExceptionThread
 
 def initialize_app(config):
     return Firebase(config)
@@ -317,9 +318,9 @@ class Database:
         raise_detailed_error(request_object)
         return request_object.json()
 
-    def stream(self, stream_handler, token=None, stream_id=None):
+    def stream(self, stream_handler, token=None, stream_id=None, exception_handler=None, daemon=False):
         request_ref = self.build_request_url(token)
-        return Stream(request_ref, stream_handler, self.build_headers, stream_id)
+        return Stream(request_ref, stream_handler, self.build_headers, stream_id, exception_handler, daemon)
 
     def check_token(self, database_url, path, token):
         if token:
@@ -523,18 +524,25 @@ class ClosableSSEClient(SSEClient):
         else:
             raise StopIteration()
 
+    def _socket(self):
+        fp = self.resp.raw._fp
+        return fp.raw._sock if hasattr(fp, 'raw') else fp._sock
+
     def close(self):
         self.should_connect = False
         self.retry = 0
         self.resp.raw._fp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
-        self.resp.raw._fp.fp.raw._sock.close()
+        if(self.resp.raw._fp.fp):
+            self.resp.raw._fp.fp.raw._sock.close()
 
 
 class Stream:
-    def __init__(self, url, stream_handler, build_headers, stream_id):
+    def __init__(self, url, stream_handler, build_headers, stream_id, exception_handler, daemon=True):
         self.build_headers = build_headers
         self.url = url
         self.stream_handler = stream_handler
+        self.exception_handler = exception_handler
+        self.daemon = daemon
         self.stream_id = stream_id
         self.sse = None
         self.thread = None
@@ -548,7 +556,8 @@ class Stream:
         return session
 
     def start(self):
-        self.thread = threading.Thread(target=self.start_stream)
+        self.thread = ExceptionThread(target=self.start_stream, callback=self.exception_handler, tid=self.stream_id)
+        self.daemon = self.daemon
         self.thread.start()
         return self
 

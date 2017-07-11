@@ -33,6 +33,14 @@ def make_append_stream(db):
     with make_stream(db, cbk) as s:
         yield s, l
 
+@contextmanager
+def make_stream_with_exception_handler(db, cbk, xbk):
+    s = db.stream(cbk, exception_handler=xbk)
+    try: 
+        yield s
+    finally: 
+        s.close()
+
 
 class TestSimpleGetAndPut:
     def test_simple_get(self, db_sa):
@@ -72,7 +80,8 @@ class TestJsonKwargs:
 
     def decoder(self, obj):
         if '__type__' in obj and obj['__type__'] == datetime.datetime.__name__:
-            return datetime.datetime.utcfromtimestamp(obj['value'])
+            #return datetime.datetime.utcfromtimestamp(obj['value'])
+            return datetime.datetime.fromtimestamp(obj['value'])
         return obj
 
     def test_put_fail(self, db_sa):
@@ -87,7 +96,7 @@ class TestJsonKwargs:
     def test_put_then_get_succeed(self, db_sa):
         v = {'another_datetime': datetime.datetime.now()}
         db_sa().set(v, json_kwargs={'default': self.encoder})
-        assert db_sa().get(json_kwargs={'object_hook': self.decoder}).val() == v
+        assert dict(db_sa().get(json_kwargs={'object_hook': self.decoder}).val()) == v
 
 
 class TestChildNavigation:
@@ -131,6 +140,93 @@ class TestStreaming:
             db_sa().update({"2": "c"})
             db_sa().push("3")
 
-            time.sleep(2)
-
             assert len(l) == 3
+
+    def test_simple_stream(self, db_sa):
+        print()
+        lu = {'foo': 1, 'bar': 2, 'quux': 3}
+        dl = []
+        xl = []
+
+        def exhandler(t, x):
+            print('Exception: thread=%s exception=%s' % (repr(t), repr(x)))
+            xl.append(x)
+            return True
+
+        def callback(msg):
+            print('data from stream: %s' % repr(msg))
+            if msg['data']:
+              dl.append(lu[msg['data']])
+
+        with make_stream_with_exception_handler(db_sa(), callback, exhandler) as stream:
+            db_sa().set('foo')
+            db_sa().set('bar')
+            db_sa().set('baz')
+            db_sa().set('quux')
+
+            time.sleep(2)
+            assert dl == [1,2,3]
+            assert len(xl)
+
+    def test_listen_and_restart(self, db_sa):
+        print()
+        dl = []
+        xl = []
+
+        def exhandler(t, x):
+            print('Exception: thread=%s exception=%s' % (repr(t), repr(x)))
+            xl.append(x)
+            return True
+
+        def callback(msg):
+            print('data from stream: %s' % repr(msg))
+            if msg['data']:
+              dl.append(msg['data'])
+
+        with make_stream_with_exception_handler(db_sa(), callback, exhandler) as stream:
+            db_sa().set('foo')
+            db_sa().set('bar')
+            time.sleep(1)
+                
+        with make_stream_with_exception_handler(db_sa(), callback, exhandler) as stream:
+            db_sa().set('baz')
+            db_sa().set('quux')
+            time.sleep(1)
+                 
+        time.sleep(1)
+        assert dl == ['foo', 'bar', 'baz', 'quux']
+        assert not len(xl)
+
+    def test_without_context(self, db_sa):
+        print()
+        dl = []
+        xl = []
+
+        def exhandler(t, x):
+            print('Exception: thread=%s exception=%s' % (repr(t), repr(x)))
+            xl.append(x)
+            return True
+
+        def callback(msg):
+            print('data from stream: %s' % repr(msg))
+            if msg['data']:
+              print('appending: %s' % msg['data'])
+              dl.append(msg['data'])
+            
+        s = db_sa().stream(callback, exception_handler=exhandler, stream_id=111)
+        db_sa().push('one')
+        db_sa().push('two')
+        db_sa().push('three')
+        time.sleep(1)  
+        s.close()
+
+        s = db_sa().stream(callback, exception_handler=exhandler, stream_id=222)
+        db_sa().push('four')
+        db_sa().push('five')
+        time.sleep(1)  
+        s.close()
+
+        time.sleep(3)  
+        for d in dl:
+            print(d)
+        assert dl
