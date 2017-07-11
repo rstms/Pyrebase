@@ -318,9 +318,9 @@ class Database:
         raise_detailed_error(request_object)
         return request_object.json()
 
-    def stream(self, stream_handler, token=None, stream_id=None, exception_handler=None, daemon=False):
+    def stream(self, stream_handler, token=None, stream_id=None, exception_handler=None, daemon=False, auto_restart=0):
         request_ref = self.build_request_url(token)
-        return Stream(request_ref, stream_handler, self.build_headers, stream_id, exception_handler, daemon)
+        return Stream(request_ref, stream_handler, self.build_headers, stream_id, exception_handler, daemon, auto_restart)
 
     def check_token(self, database_url, path, token):
         if token:
@@ -524,20 +524,17 @@ class ClosableSSEClient(SSEClient):
         else:
             raise StopIteration()
 
-    def _socket(self):
-        fp = self.resp.raw._fp
-        return fp.raw._sock if hasattr(fp, 'raw') else fp._sock
-
     def close(self):
         self.should_connect = False
         self.retry = 0
-        self.resp.raw._fp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+        if(self.resp.raw._fp.fp):
+            self.resp.raw._fp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
         if(self.resp.raw._fp.fp):
             self.resp.raw._fp.fp.raw._sock.close()
 
 
 class Stream:
-    def __init__(self, url, stream_handler, build_headers, stream_id, exception_handler, daemon=True):
+    def __init__(self, url, stream_handler, build_headers, stream_id, exception_handler, daemon=False, auto_restart=0):
         self.build_headers = build_headers
         self.url = url
         self.stream_handler = stream_handler
@@ -546,7 +543,12 @@ class Stream:
         self.stream_id = stream_id
         self.sse = None
         self.thread = None
+        self.restart_thread = None
+        self.started = False
         self.start()
+        self.auto_restart = auto_restart
+        if auto_restart:
+            self.autostart()
 
     def make_session(self):
         """
@@ -556,13 +558,16 @@ class Stream:
         return session
 
     def start(self):
+        #print('pyrebase.Stream().start')
         self.thread = ExceptionThread(target=self.start_stream, callback=self.exception_handler, tid=self.stream_id)
         self.daemon = self.daemon
         self.thread.start()
         return self
 
     def start_stream(self):
+        #print('pyrebase.Stream().start_stream')
         self.sse = ClosableSSEClient(self.url, session=self.make_session(), build_headers=self.build_headers)
+        self.started = True
         for msg in self.sse:
             if msg:
                 msg_data = json.loads(msg.data)
@@ -571,10 +576,36 @@ class Stream:
                     msg_data["stream_id"] = self.stream_id
                 self.stream_handler(msg_data)
 
-    def close(self):
+    def autostart(self):
+        #print('pyrebase.Stream().autostart')
+        tid = self.stream_id
+        if tid and type(tid)==str:
+            tid += ':restart'
+        self.restart_thread = ExceptionThread(target=self.restart_stream, callback=self.exception_handler, tid=tid)
+        self.restart_daemon = self.daemon
+        self.restart_thread.start()
+
+    def restart_stream(self):
+        #print('pyrebase.Stream().restart_stream')
+        next_restart = time.time() + self.auto_restart
+        while self.auto_restart:
+            #print('pyrebase.Stream().restart_stream: restarting')
+            if time.time() >= next_restart:
+                next_restart = time.time() + self.auto_restart
+                if self.started:
+                    self.close(_restart=True)
+                self.start()
+            time.sleep(1)
+
+    def close(self, _restart=False):
+        #print('pyrebase.Stream().close')
+        if self.restart_thread and not _restart:
+            self.auto_restart=None
+            self.restart_thread.join()
         while not self.sse and not hasattr(self.sse, 'resp'):
             time.sleep(0.001)
         self.sse.running = False
         self.sse.close()
         self.thread.join()
+        self.started = False
         return self

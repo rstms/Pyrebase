@@ -34,8 +34,8 @@ def make_append_stream(db):
         yield s, l
 
 @contextmanager
-def make_stream_with_exception_handler(db, cbk, xbk):
-    s = db.stream(cbk, exception_handler=xbk)
+def make_stream_with_exception_handler(db, cbk, xbk, auto_restart=0, daemon=False):
+    s = db.stream(cbk, exception_handler=xbk, auto_restart=auto_restart, daemon=daemon)
     try: 
         yield s
     finally: 
@@ -140,6 +140,7 @@ class TestStreaming:
             db_sa().update({"2": "c"})
             db_sa().push("3")
 
+            time.sleep(2)
             assert len(l) == 3
 
     def test_simple_stream(self, db_sa):
@@ -230,3 +231,29 @@ class TestStreaming:
         for d in dl:
             print(d)
         assert dl
+
+    def test_auto_restart(self, db_sa):
+        print()
+        dd = {}
+
+        def exhandler(t, x):
+            print('Exception: thread=%s exception=%s' % (repr(t), repr(x)))
+            return False
+
+        def callback(msg):
+            print('data from stream: %s' % repr(msg))
+            if msg['data']:
+                print('appending: %s' % msg['data'])
+                d = (msg['data'])
+                assert type(d) == dict
+                for k,v, in d.items():
+                    dd[k]=v
+                        
+        with make_stream_with_exception_handler(db_sa(), callback, exhandler, daemon=True, auto_restart=1) as stream:
+            for s in range(5):        
+                print('put: %s' % s)
+                db_sa().push(s)
+                time.sleep(.5)
+
+        time.sleep(3)
+        assert set(dd.values()) == set([0,1,2,3,4])
